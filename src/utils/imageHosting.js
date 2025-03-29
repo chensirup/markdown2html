@@ -164,20 +164,37 @@ export const customImageUpload = async ({
 }) => {
   showUploadNoti();
   try {
+    // 检查文件是否有效
+    if (!file || !file.name) {
+      throw new Error('无效的文件');
+    }
+    
+    // 检查图床URL是否配置
+    if (!imageHosting.hostingUrl) {
+      throw new Error('请先配置图床URL');
+    }
+    
     formData.append("file", file);
     const config = {
       headers: {
         "Content-Type": "multipart/form-data",
       },
+      timeout: 10000 // 添加超时设置
     };
     const postURL = imageHosting.hostingUrl;
     const result = await axios.post(postURL, formData, config);
+    
+    // 检查返回结果是否有效
+    if (!result || !result.data || !result.data.data) {
+      throw new Error('图床返回无效数据');
+    }
+    
     const names = file.name.split(".");
     names.pop();
     const filename = names.join(".");
     const image = {
       filename,
-      url: encodeURI(result.data.data), // 这里要和外接图床规定好数据逻辑，否则会接入失败
+      url: encodeURI(result.data.data),
     };
 
     if (content) {
@@ -189,8 +206,9 @@ export const customImageUpload = async ({
       hideUploadNoti();
     }, 500);
   } catch (error) {
+    console.error('图片上传失败:', error);
     message.destroy();
-    uploadError(error.toString());
+    uploadError(error.message || error.toString());
     onError(error, error.toString());
   }
 };
