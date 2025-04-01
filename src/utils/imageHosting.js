@@ -20,16 +20,44 @@ import {
 import {toBlob, getOSSName, axiosMdnice} from "./helper";
 
 function showUploadNoti() {
-  message.loading("图片上传中", 0);
+  // 使用更安全的方式显示加载消息
+  try {
+    message.loading("图片上传中", 0);
+  } catch (error) {
+    console.error("显示上传通知失败:", error);
+  }
 }
 
 function uploadError(description = "图片上传失败") {
-  message.error(description, 3);
+  try {
+    // 确保消息显示时间足够长，让用户能看到错误
+    message.error(description, 3);
+  } catch (error) {
+    console.error("显示错误通知失败:", error);
+    // 降级处理，尝试使用alert
+    try {
+      // 检查是否为服务不可用错误
+      if (description.includes("Service is unavailable") || description === "服务不可用" || description.includes("network") || description.includes("Network")) {
+        console.error("预览服务连接失败");
+        // 使用更友好的错误提示
+        message.error("预览服务暂时不可用，请稍后再试或检查网络连接", 5);
+      } else {
+        alert(description);
+      }
+    } catch (e) {
+      console.error("显示alert失败:", e);
+    }
+  }
 }
 
 function hideUploadNoti() {
-  message.destroy();
-  message.success("图片上传成功");
+  try {
+    // 先销毁所有消息，然后显示成功消息
+    message.destroy();
+    message.success("图片上传成功");
+  } catch (error) {
+    console.error("隐藏上传通知失败:", error);
+  }
 }
 
 function writeToEditor({content, image}) {
@@ -57,8 +85,16 @@ export const qiniuOSSUpload = async ({
   content = null, // store content
 }) => {
   showUploadNoti();
-  const config = JSON.parse(window.localStorage.getItem(QINIUOSS_IMAGE_HOSTING));
+  let config;
   try {
+    // 安全地获取和解析配置
+    const configStr = window.localStorage.getItem(QINIUOSS_IMAGE_HOSTING);
+    config = configStr ? JSON.parse(configStr) : {};
+    
+    // 检查配置是否完整
+    if (!config || !config.accessKey || !config.secretKey || !config.bucket || !config.domain) {
+      throw new Error("七牛云配置不完整，请检查配置");
+    }
     let {domain} = config;
     const {namespace} = config;
     // domain可能配置时末尾没有加‘/’
@@ -149,6 +185,9 @@ export const qiniuOSSUpload = async ({
       imageObservable.subscribe(imageObserver);
     };
   } catch (err) {
+    console.error("七牛云上传错误:", err);
+    hideUploadNoti();
+    uploadError(err.message || "七牛云上传失败");
     onError(err, err.toString());
   }
 };
@@ -170,24 +209,33 @@ export const customImageUpload = async ({
     }
     
     // 检查图床URL是否配置
-    if (!imageHosting.hostingUrl) {
+    if (!imageHosting || !imageHosting.hostingUrl) {
       throw new Error('请先配置图床URL');
     }
     
-    formData.append("file", file);
+    // 创建新的FormData对象，避免重用可能已经被修改的formData
+    const uploadFormData = new FormData();
+    uploadFormData.append("file", file);
+    
     const config = {
       headers: {
         "Content-Type": "multipart/form-data",
       },
-      timeout: 10000 // 添加超时设置
+      timeout: 30000 // 增加超时设置到30秒，避免大文件上传超时
     };
+    
     const postURL = imageHosting.hostingUrl;
-    const result = await axios.post(postURL, formData, config);
+    console.log("开始上传到自定义图床:", postURL);
+    
+    const result = await axios.post(postURL, uploadFormData, config);
     
     // 检查返回结果是否有效
-    if (!result || !result.data || !result.data.data) {
+    if (!result || !result.data) {
       throw new Error('图床返回无效数据');
     }
+    
+    // 兼容不同的API返回格式
+    const imageUrl = result.data.data || result.data.url || result.data.link || result.data;
     
     const names = file.name.split(".");
     names.pop();
@@ -227,43 +275,138 @@ export const smmsUpload = ({
   content = null, // store content
 }) => {
   showUploadNoti();
-  // SM.MS图床必须这里命名为smfile
-  formData.append("smfile", file);
-  axios
-    .post(action, formData, {
-      withCredentials,
-      headers,
-      onUploadProgress: ({total, loaded}) => {
-        onProgress(
-          {
-            percent: parseInt(Math.round((loaded / total) * 100).toFixed(2), 10),
-          },
-          file,
-        );
-      },
-    })
-    .then(({data: response}) => {
-      if (response.code === "exception") {
-        throw response.message;
-      }
-      const image = {
-        filename: response.data.filename,
-        url: response.data.url,
-      };
-      if (content) {
-        writeToEditor({content, image});
-      }
-      images.push(image);
-      onSuccess(response, file);
-      setTimeout(() => {
-        hideUploadNoti();
-      }, 500);
-    })
-    .catch((error) => {
+  
+  try {
+    // 检查文件是否有效
+    if (!file || !file.name) {
       hideUploadNoti();
-      uploadError(error.toString());
-      onError(error, error.toString());
-    });
+      const errorMsg = "无效的文件";
+      uploadError(errorMsg);
+      onError(new Error(errorMsg), errorMsg);
+      return;
+    }
+    
+    // 检查文件大小，SM.MS限制为5MB
+    if (file.size > 5 * 1024 * 1024) {
+      hideUploadNoti();
+      const errorMsg = "SM.MS图床限制图片大小不超过5MB";
+      uploadError(errorMsg);
+      onError(new Error(errorMsg), errorMsg);
+      return;
+    }
+    
+    // 检查action是否有效
+    if (!action) {
+      hideUploadNoti();
+      const errorMsg = "SM.MS上传地址无效";
+      uploadError(errorMsg);
+      onError(new Error(errorMsg), errorMsg);
+      return;
+    }
+    
+    // 创建新的FormData对象，避免重用可能已经被修改的formData
+    const uploadFormData = new FormData();
+    // SM.MS API V2 使用file作为参数名
+    uploadFormData.append("file", file);
+    
+    // 设置超时时间和请求头
+    const requestConfig = {
+      withCredentials,
+      headers: headers || {},
+      timeout: 30000, // 30秒超时
+      onUploadProgress: function(progressEvent) {
+        if (progressEvent && progressEvent.total) {
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          onProgress(
+            {
+              percent: percent,
+            },
+            file,
+          );
+        }
+      },
+    };
+    
+    console.log("开始上传到SM.MS图床", action);
+    
+    axios
+      .post(action, uploadFormData, requestConfig)
+      .then(function(response) {
+        try {
+          if (!response || !response.data) {
+            throw new Error("上传响应无效");
+          }
+          
+          const responseData = response.data;
+          console.log("SM.MS上传响应:", responseData);
+          
+          // SM.MS API V2 返回格式处理
+          if (responseData.success === false || (responseData.code !== "success" && responseData.code !== 200)) {
+            throw new Error(responseData.message || responseData.error || "上传失败");
+          }
+          
+          // API V2 的数据在data字段中
+          const imageData = responseData.data || {};
+          const image = {
+            filename: imageData.filename || file.name,
+            url: imageData.url || (imageData.images && imageData.images.url),
+          };
+          
+          // 确保获取到了URL
+          if (!image.url) {
+            throw new Error("未获取到图片URL");
+          }
+          
+          console.log("SM.MS上传成功，图片URL:", image.url);
+          
+          if (content) {
+            writeToEditor({content, image});
+          }
+          images.push(image);
+          onSuccess(responseData, file);
+          setTimeout(function() {
+            hideUploadNoti();
+          }, 500);
+        } catch (error) {
+          hideUploadNoti();
+          const errorMsg = "处理SM.MS响应出错: " + (error.message || "未知错误");
+          console.error(errorMsg, error);
+          uploadError(errorMsg);
+          onError(error, errorMsg);
+        }
+      })
+      .catch(function(error) {
+        hideUploadNoti();
+        // 提供更详细的错误信息
+        let errorMsg = "图片上传失败";
+        
+        // 检查是否是网络错误
+        if (error.message === "Network Error") {
+          errorMsg = "网络连接错误，请检查您的网络连接或者SM.MS服务是否可用";
+        } else if (error.response) {
+          // 服务器返回了错误状态码
+          const responseData = error.response.data || {};
+          errorMsg = "服务器错误 (" + (error.response.status || "未知") + "): " + 
+                    (responseData.message || responseData.error || error.message || "未知错误");
+        } else if (error.request) {
+          // 请求发出但没有收到响应
+          errorMsg = "服务器没有响应，请稍后重试";
+        } else {
+          // 其他错误
+          errorMsg = error.message || "未知错误";
+        }
+        
+        console.error('SM.MS上传错误:', error);
+        uploadError(errorMsg);
+        onError(error, errorMsg);
+      });
+  } catch (error) {
+    hideUploadNoti();
+    const errorMsg = "SM.MS上传初始化错误: " + (error.message || "未知错误");
+    console.error(errorMsg, error);
+    uploadError(errorMsg);
+    onError(error, errorMsg);
+  }
 };
 
 // 阿里对象存储，上传部分
@@ -272,7 +415,10 @@ const aliOSSPutObject = ({config, file, buffer, onSuccess, onError, images, cont
   try {
     client = new OSS(config);
   } catch (error) {
-    message.error("OSS配置错误，请根据文档检查配置项");
+    console.error("OSS客户端创建错误:", error);
+    hideUploadNoti();
+    uploadError("OSS配置错误，请根据文档检查配置项");
+    onError(error, "OSS配置错误，请根据文档检查配置项");
     return;
   }
 
@@ -281,27 +427,33 @@ const aliOSSPutObject = ({config, file, buffer, onSuccess, onError, images, cont
   client
     .put(OSSName, buffer)
     .then((response) => {
-      const names = file.name.split(".");
-      names.pop();
-      const filename = names.join(".");
-      const image = {
-        filename, // 名字不变并且去掉后缀
-        url: response.url,
-      };
-      if (content) {
-        writeToEditor({content, image});
-      }
-      images.push(image);
-      onSuccess(response, file);
-      setTimeout(() => {
+      try {
+        const names = file.name.split(".");
+        names.pop();
+        const filename = names.join(".");
+        const image = {
+          filename, // 名字不变并且去掉后缀
+          url: response.url,
+        };
+        if (content) {
+          writeToEditor({content, image});
+        }
+        images.push(image);
+        onSuccess(response, file);
+        setTimeout(() => {
+          hideUploadNoti();
+        }, 500);
+      } catch (err) {
+        console.error("处理阿里云上传结果错误:", err);
         hideUploadNoti();
-      }, 500);
+        uploadError("处理上传结果时出错");
+        onError(err, err.toString());
+      }
     })
     .catch((error) => {
-      console.log(error);
-
+      console.error("阿里云上传错误:", error);
       hideUploadNoti();
-      uploadError("请根据文档检查配置项");
+      uploadError("阿里云上传失败: " + (error.message || "请根据文档检查配置项"));
       onError(error, error.toString());
     });
 };
@@ -315,29 +467,78 @@ export const aliOSSUpload = ({
   content = null, // store content
 }) => {
   showUploadNoti();
-  const config = JSON.parse(window.localStorage.getItem(ALIOSS_IMAGE_HOSTING));
-  const base64Reader = new FileReader();
-  base64Reader.readAsDataURL(file);
-  base64Reader.onload = (e) => {
-    const urlData = e.target.result;
-    const base64 = urlData.split(",").pop();
-    const fileType = urlData
-      .split(";")
-      .shift()
-      .split(":")
-      .pop();
+  let config = {};
+  try {
+    // 安全地解析JSON配置
+    try {
+      config = JSON.parse(window.localStorage.getItem(ALIOSS_IMAGE_HOSTING) || '{}');
+    } catch (e) {
+      console.error("阿里云配置解析错误:", e);
+      throw new Error("阿里云配置格式错误，请重新配置");
+    }
+    
+    // 检查配置是否完整
+    if (!config.region || !config.accessKeyId || !config.accessKeySecret || !config.bucket) {
+      throw new Error("阿里云配置不完整，请检查配置");
+    }
+    
+    const base64Reader = new FileReader();
+    base64Reader.readAsDataURL(file);
+    
+    base64Reader.onload = (e) => {
+      try {
+        const urlData = e.target.result;
+        const base64 = urlData.split(",").pop();
+        const fileType = urlData
+          .split(";")
+          .shift()
+          .split(":")
+          .pop();
 
-    // base64转blob
-    const blob = toBlob(base64, fileType);
+        // base64转blob
+        const blob = toBlob(base64, fileType);
 
-    // blob转arrayBuffer
-    const bufferReader = new FileReader();
-    bufferReader.readAsArrayBuffer(blob);
-    bufferReader.onload = (event) => {
-      const buffer = new OSS.Buffer(event.target.result);
-      aliOSSPutObject({config, file, buffer, onSuccess, onError, images, content});
+        // blob转arrayBuffer
+        const bufferReader = new FileReader();
+        bufferReader.readAsArrayBuffer(blob);
+        bufferReader.onload = (event) => {
+          try {
+            const buffer = new OSS.Buffer(event.target.result);
+            aliOSSPutObject({config, file, buffer, onSuccess, onError, images, content});
+          } catch (err) {
+            console.error("处理文件缓冲区错误:", err);
+            hideUploadNoti();
+            uploadError("处理文件时出错");
+            onError(err, err.toString());
+          }
+        };
+        
+        bufferReader.onerror = (err) => {
+          console.error("读取文件缓冲区错误:", err);
+          hideUploadNoti();
+          uploadError("读取文件时出错");
+          onError(err, err.toString());
+        };
+      } catch (err) {
+        console.error("处理文件数据错误:", err);
+        hideUploadNoti();
+        uploadError("处理文件数据时出错");
+        onError(err, err.toString());
+      }
     };
-  };
+    
+    base64Reader.onerror = (err) => {
+      console.error("读取文件错误:", err);
+      hideUploadNoti();
+      uploadError("读取文件时出错");
+      onError(err, err.toString());
+    };
+  } catch (error) {
+    console.error("阿里云上传初始化错误:", error);
+    hideUploadNoti();
+    uploadError(error.message || "阿里云上传配置错误");
+    onError(error, error.toString());
+  }
 };
 
 // Gitee存储上传
@@ -410,10 +611,12 @@ export const giteeUpload = ({
           hideUploadNoti();
         }, 500);
       })
-      .catch((error, info) => {
+      .catch((error) => {
         hideUploadNoti();
-        uploadError(error.toString() + " 可能存在图片名重复等问题");
-        onError(error, error.toString() + " 可能存在图片名重复等问题");
+        let errorMsg = "Gitee图片上传失败: " + (error.toString() + " 可能存在图片名重复等问题");
+        console.error('Gitee上传错误:', error);
+        uploadError(errorMsg);
+        onError(error, errorMsg);
       });
   };
 };
@@ -434,6 +637,14 @@ export const githubUpload = ({
 
   const config = JSON.parse(window.localStorage.getItem(GITHUB_IMAGE_HOSTING));
 
+  // 检查配置是否完整
+  if (!config.username || !config.repo || !config.token) {
+    hideUploadNoti();
+    uploadError("GitHub配置不完整，请检查配置");
+    onError(new Error("GitHub配置不完整"), "GitHub配置不完整，请检查配置");
+    return;
+  }
+
   const base64Reader = new FileReader();
   base64Reader.readAsDataURL(file);
   base64Reader.onload = (e) => {
@@ -445,17 +656,25 @@ export const githubUpload = ({
     const dir = date.getFullYear() + seperator + (date.getMonth() + 1) + seperator + date.getDate();
 
     const dateFilename = new Date().getTime() + "-" + file.name;
-    const url = `https://api.github.com/repos/${config.username}/${config.repo}/contents/${dir}/${dateFilename}?access_token=${config.token}`;
+    // 不在URL中使用token，而是在请求头中使用
+    const url = `https://api.github.com/repos/${config.username}/${config.repo}/contents/${dir}/${dateFilename}`;
 
     const data = {
       content: base64,
       message: "mdnice upload picture",
     };
 
+    // 设置认证头
+    const requestHeaders = {
+      ...headers,
+      Authorization: `token ${config.token}`,
+    };
+
     axios
       .put(url, data, {
         withCredentials,
-        headers,
+        headers: requestHeaders,
+        timeout: 30000, // 30秒超时
         onUploadProgress: ({total, loaded}) => {
           onProgress(
             {
@@ -465,87 +684,241 @@ export const githubUpload = ({
           );
         },
       })
-      .then(({data: response}) => {
-        if (response.code === "exception") {
-          throw response.message;
-        }
-        const names = file.name.split(".");
-        names.pop();
-        const filename = names.join(".");
+      .then(function(response) {
+        try {
+          if (!response || !response.data) {
+            throw new Error("上传响应无效");
+          }
+          
+          const responseData = response.data;
+          
+          if (responseData.code === "exception") {
+            throw new Error(responseData.message || "上传异常");
+          }
+          
+          const names = file.name.split(".");
+          names.pop();
+          const filename = names.join(".");
 
-        const imageUrl =
-          config.jsdelivr === "true"
-            ? `https://cdn.jsdelivr.net/gh/${config.username}/${config.repo}/${dir}/${dateFilename}`
-            : response.content.download_url;
+          // 安全地构建URL
+          let imageUrl;
+          try {
+            if (config.jsdelivr === "true") {
+              imageUrl = "https://cdn.jsdelivr.net/gh/" + config.username + "/" + config.repo + "/" + dir + "/" + dateFilename;
+            } else {
+              if (responseData.content && responseData.content.download_url) {
+                imageUrl = responseData.content.download_url;
+              } else {
+                throw new Error("无法获取图片URL");
+              }
+            }
+          } catch (urlError) {
+            console.error("构建图片URL错误:", urlError);
+            throw new Error("无法构建图片URL: " + urlError.message);
+          }
 
-        const image = {
-          filename,
-          url: imageUrl,
-        };
-        if (content) {
-          writeToEditor({content, image});
-        }
-        images.push(image);
-        onSuccess(response, file);
-        setTimeout(() => {
+          const image = {
+            filename,
+            url: imageUrl,
+          };
+          
+          if (content) {
+            writeToEditor({content, image});
+          }
+          
+          images.push(image);
+          onSuccess(responseData, file);
+          
+          setTimeout(function() {
+            hideUploadNoti();
+          }, 500);
+        } catch (error) {
           hideUploadNoti();
-        }, 500);
+          const errorMsg = "处理GitHub响应出错: " + (error.message || "未知错误");
+          console.error(errorMsg, error);
+          uploadError(errorMsg);
+          onError(error, errorMsg);
+        }
       })
-      .catch((error, info) => {
+      .catch(function(error) {
         hideUploadNoti();
-        uploadError(error.toString());
-        onError(error, error.toString());
+        let errorMsg = "GitHub图片上传失败";
+        
+        // 检查是否是网络错误
+        if (error.message === "Network Error") {
+          errorMsg = "网络连接错误，请检查您的网络连接或者GitHub服务是否可用";
+        } else if (error.response) {
+          // 服务器返回了错误状态码
+          const status = error.response.status || "未知";
+          const message = (error.response.data && error.response.data.message) || error.message || "未知错误";
+          errorMsg = "GitHub服务器错误 (" + status + "): " + message;
+        } else if (error.request) {
+          // 请求发出但没有收到响应
+          errorMsg = "GitHub服务器没有响应，请稍后重试";
+        }
+        
+        console.error('GitHub上传错误:', error);
+        uploadError(errorMsg);
+        onError(error, errorMsg);
       });
   };
 };
 
 // 自动检测上传配置，进行上传
 export const uploadAdaptor = (...args) => {
-  const type = localStorage.getItem(IMAGE_HOSTING_TYPE); // SM.MS | 阿里云 | 七牛云 | Gitee | GitHub | 用户自定义图床
-  const userType = imageHosting.hostingName;
-  if (type === userType) {
-    return customImageUpload(...args);
-  } else if (type === IMAGE_HOSTING_NAMES.smms) {
-    return smmsUpload(...args);
-  } else if (type === IMAGE_HOSTING_NAMES.qiniuyun) {
-    const config = JSON.parse(window.localStorage.getItem(QINIUOSS_IMAGE_HOSTING));
-    if (
-      !config.region.length ||
-      !config.accessKey.length ||
-      !config.secretKey.length ||
-      !config.bucket.length ||
-      !config.domain.length
-    ) {
-      message.error("请先配置七牛云图床");
-      return false;
+  let params = {};
+  try {
+    // 提取参数
+    params = args[0] || {};
+    const { onError } = params;
+    
+    // 安全地获取图床类型
+    let type;
+    try {
+      type = localStorage.getItem(IMAGE_HOSTING_TYPE); // SM.MS | 阿里云 | 七牛云 | Gitee | GitHub | 用户自定义图床
+    } catch (e) {
+      console.error("获取图床类型失败:", e);
+      // 如果无法访问localStorage，使用默认图床
+      message.info("无法获取图床配置，默认使用SM.MS图床");
+      return smmsUpload(...args);
     }
-    return qiniuOSSUpload(...args);
-  } else if (type === IMAGE_HOSTING_NAMES.aliyun) {
-    const config = JSON.parse(window.localStorage.getItem(ALIOSS_IMAGE_HOSTING));
-    if (
-      !config.region.length ||
-      !config.accessKeyId.length ||
-      !config.accessKeySecret.length ||
-      !config.bucket.length
-    ) {
-      message.error("请先配置阿里云图床");
-      return false;
+    
+    // 安全地获取用户自定义图床名称
+    const userType = imageHosting && imageHosting.hostingName;
+    
+    console.log("当前选择的图床类型:", type);
+    
+    // 如果没有选择图床类型，默认使用SM.MS
+    if (!type) {
+      message.info("未选择图床类型，默认使用SM.MS图床");
+      return smmsUpload(...args);
     }
-    return aliOSSUpload(...args);
-  } else if (type === IMAGE_HOSTING_NAMES.gitee) {
-    const config = JSON.parse(window.localStorage.getItem(GITEE_IMAGE_HOSTING));
-    if (!config.username.length || !config.repo.length || !config.token.length) {
-      message.error("请先配置 Gitee 图床");
-      return false;
+    
+    // 用户自定义图床
+    if (type === userType) {
+      // 检查用户自定义图床配置
+      if (!imageHosting || !imageHosting.hostingUrl) {
+        const errorMsg = "请先配置自定义图床URL";
+        message.error(errorMsg);
+        if (onError) onError(new Error(errorMsg), errorMsg);
+        return false;
+      }
+      return customImageUpload(...args);
+    } 
+    // SM.MS图床
+    else if (type === IMAGE_HOSTING_NAMES.smms) {
+      return smmsUpload(...args);
+    } 
+    // 七牛云图床
+    else if (type === IMAGE_HOSTING_NAMES.qiniuyun) {
+      let config = {};
+      try {
+        const configStr = window.localStorage.getItem(QINIUOSS_IMAGE_HOSTING);
+        config = configStr ? JSON.parse(configStr) : {};
+      } catch (e) {
+        console.error("七牛云配置解析错误:", e);
+        const errorMsg = "七牛云配置格式错误，请重新配置";
+        message.error(errorMsg);
+        if (onError) onError(e, errorMsg);
+        return false;
+      }
+      
+      if (
+        !config || 
+        !config.accessKey ||
+        !config.secretKey ||
+        !config.bucket ||
+        !config.domain
+      ) {
+        const errorMsg = "请先完整配置七牛云图床";
+        message.error(errorMsg);
+        if (onError) onError(new Error(errorMsg), errorMsg);
+        return false;
+      }
+      return qiniuOSSUpload(...args);
+    } 
+    // 阿里云图床
+    else if (type === IMAGE_HOSTING_NAMES.aliyun) {
+      let config = {};
+      try {
+        const configStr = window.localStorage.getItem(ALIOSS_IMAGE_HOSTING);
+        config = configStr ? JSON.parse(configStr) : {};
+      } catch (e) {
+        console.error("阿里云配置解析错误:", e);
+        const errorMsg = "阿里云配置格式错误，请重新配置";
+        message.error(errorMsg);
+        if (onError) onError(e, errorMsg);
+        return false;
+      }
+      
+      if (
+        !config ||
+        !config.region ||
+        !config.accessKeyId ||
+        !config.accessKeySecret ||
+        !config.bucket
+      ) {
+        const errorMsg = "请先完整配置阿里云图床";
+        message.error(errorMsg);
+        if (onError) onError(new Error(errorMsg), errorMsg);
+        return false;
+      }
+      return aliOSSUpload(...args);
+    } 
+    // Gitee图床
+    else if (type === IMAGE_HOSTING_NAMES.gitee) {
+      let config = {};
+      try {
+        const configStr = window.localStorage.getItem(GITEE_IMAGE_HOSTING);
+        config = configStr ? JSON.parse(configStr) : {};
+      } catch (e) {
+        console.error("Gitee配置解析错误:", e);
+        const errorMsg = "Gitee配置格式错误，请重新配置";
+        message.error(errorMsg);
+        if (onError) onError(e, errorMsg);
+        return false;
+      }
+      
+      if (!config || !config.username || !config.repo || !config.token) {
+        const errorMsg = "请先完整配置 Gitee 图床";
+        message.error(errorMsg);
+        if (onError) onError(new Error(errorMsg), errorMsg);
+        return false;
+      }
+      return giteeUpload(...args);
+    } 
+    // GitHub图床
+    else if (type === IMAGE_HOSTING_NAMES.github) {
+      let config = {};
+      try {
+        const configStr = window.localStorage.getItem(GITHUB_IMAGE_HOSTING);
+        config = configStr ? JSON.parse(configStr) : {};
+      } catch (e) {
+        console.error("GitHub配置解析错误:", e);
+        const errorMsg = "GitHub配置格式错误，请重新配置";
+        message.error(errorMsg);
+        if (onError) onError(e, errorMsg);
+        return false;
+      }
+      
+      if (!config || !config.username || !config.repo || !config.token) {
+        const errorMsg = "请先完整配置 GitHub 图床";
+        message.error(errorMsg);
+        if (onError) onError(new Error(errorMsg), errorMsg);
+        return false;
+      }
+      return githubUpload(...args);
+    } else {
+      // 未知图床类型，默认使用SM.MS
+      const infoMsg = "未知图床类型，默认使用SM.MS图床";
+      message.info(infoMsg);
+      return smmsUpload(...args);
     }
-    return giteeUpload(...args);
-  } else if (type === IMAGE_HOSTING_NAMES.github) {
-    const config = JSON.parse(window.localStorage.getItem(GITHUB_IMAGE_HOSTING));
-    if (!config.username.length || !config.repo.length || !config.token.length) {
-      message.error("请先配置 GitHub 图床");
-      return false;
-    }
-    return githubUpload(...args);
+  } catch (error) {
+    console.error("图床适配器错误:", error);
+    const errorMsg = "图床配置错误，请检查配置或重新选择图床";
+    message.error(errorMsg);
+    if (params && params.onError) params.onError(error, errorMsg);
+    return false;
   }
-  return true;
 };

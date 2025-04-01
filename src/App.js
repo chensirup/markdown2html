@@ -84,7 +84,9 @@ class App extends Component {
       require("mathjax/es5/tex-svg-full");
       pluginCenter.mathjax = true;
     } catch (e) {
-      console.log(e);
+      console.error("MathJax加载失败:", e);
+      // 设置mathjax标志为false，防止后续调用updateMathjax时出错
+      pluginCenter.mathjax = false;
     }
     this.setEditorContent();
     this.setCustomImageHosting();

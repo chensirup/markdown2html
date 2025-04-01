@@ -5,7 +5,11 @@ export const CLIENT_SECRET =
     : "dfd9fdc1da6a6b10e473280bf0a379513f1d154d";
 
 export const PROXY = "https://cors-anywhere.herokuapp.com/https://github.com/login/oauth/access_token";
-export const SM_MS_PROXY = "https://cors-anywhere.herokuapp.com/https://sm.ms/api/upload";
+// 使用SM.MS的API V2
+export const SM_MS_PROXY = "https://sm.ms/api/v2/upload";
+// 备用代理，如果上面的直接访问不成功，可以尝试这个
+// export const SM_MS_PROXY = "https://cors.bridged.cc/https://sm.ms/api/v2/upload";
+// 如果遇到CORS问题，可以考虑使用自己的代理服务器
 export const ACCESS_TOKEN = "ACCESS_TOKEN";
 
 export const USERNAME = "username";

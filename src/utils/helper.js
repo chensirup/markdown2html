@@ -32,7 +32,60 @@ export const axiosJSON = axios.create({
 export const axiosMdnice = axios.create({
   // baseURL: process.env.NODE_ENV === "development" ? "http://localhost:8081" : "https://math.mdnice.com",
   baseURL: process.env.NODE_ENV === "development" ? "https://math.mdnice.com" : "https://math.mdnice.com",
+  timeout: 10000, // 设置超时时间为10秒
+  // 添加错误处理
+  validateStatus: function (status) {
+    return status >= 200 && status < 300; // 默认值
+  },
+  // 启用重试机制
+  retry: 3,
+  retryDelay: 1000
 });
+
+// 添加请求拦截器
+axiosMdnice.interceptors.request.use(
+  config => {
+    return config;
+  },
+  error => {
+    console.error("请求配置错误:", error);
+    return Promise.reject(error);
+  }
+);
+
+// 添加响应拦截器处理错误
+axiosMdnice.interceptors.response.use(
+  response => response,
+  error => {
+    const { config } = error;
+    // 如果配置了重试，并且请求失败，尝试重试
+    if (config && config.retry) {
+      // 设置重试计数器
+      config.__retryCount = config.__retryCount || 0;
+      
+      // 检查是否已经达到最大重试次数
+      if (config.__retryCount < config.retry) {
+        // 增加重试计数
+        config.__retryCount += 1;
+        
+        // 创建新的Promise来处理重试
+        const backoff = new Promise(function(resolve) {
+          setTimeout(function() {
+            resolve();
+          }, config.retryDelay || 1000);
+        });
+        
+        // 返回重试请求
+        return backoff.then(function() {
+          return axiosMdnice(config);
+        });
+      }
+    }
+    
+    console.error("服务连接错误:", error);
+    return Promise.reject(error);
+  }
+);
 
 export const queryParse = (search = window.location.search) => {
   if (!search) return {};
@@ -276,9 +329,15 @@ export const addStyleLabel = (styleLabels) => {
 };
 
 export const updateMathjax = () => {
-  window.MathJax.texReset();
-  window.MathJax.typesetClear();
-  window.MathJax.typesetPromise();
+  try {
+    if (window.MathJax) {
+      window.MathJax.texReset();
+      window.MathJax.typesetClear();
+      window.MathJax.typesetPromise();
+    }
+  } catch (error) {
+    console.error("MathJax渲染错误:", error);
+  }
 };
 
 export const download = (content, filename) => {
